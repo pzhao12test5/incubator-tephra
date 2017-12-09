@@ -437,6 +437,7 @@
                   <exclude>**/.project</exclude>
                   <exclude>**/.classpath</exclude>
                   <exclude>**/.settings/**</exclude>
+                  <exclude>licenses/**</exclude>
                 <exclude>**/.ekstazi/**</exclude>
                                     <exclude>**/.travis.yml</exclude>
                                     <exclude>**/NOW</exclude>
