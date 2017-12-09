@@ -267,15 +267,25 @@ public class TransactionContext {
         // abort will throw that exception
       }
     }
+
+    boolean canCommit = false;
     try {
-      txClient.canCommitOrThrow(currentTx, changes);
-    } catch (TransactionFailureException e) {
-      abort(e);
-      // abort will rethrow this exception
-    } catch (Throwable e) {
-      String message = String.format("Exception from canCommit for transaction %d.", currentTx.getTransactionId());
+      canCommit = txClient.canCommit(currentTx, changes);
+    } catch (TransactionNotInProgressException e) {
+      String message = String.format("Transaction %d is not in progress.", currentTx.getTransactionId());
+      LOG.warn(message, e);
       abort(new TransactionFailureException(message, e));
       // abort will throw that exception
+    } catch (Throwable e) {
+      String message = String.format("Exception from canCommit for transaction %d.", currentTx.getTransactionId());
+      LOG.warn(message, e);
+      abort(new TransactionFailureException(message, e));
+      // abort will throw that exception
+    }
+    if (!canCommit) {
+      String message = String.format("Conflict detected for transaction %d.", currentTx.getTransactionId());
+      abort(new TransactionConflictException(message));
+      // abort will throw
     }
   }
 
@@ -304,15 +314,24 @@ public class TransactionContext {
   }
 
   private void commit() throws TransactionFailureException {
+    boolean commitSuccess = false;
     try {
-      txClient.commitOrThrow(currentTx);
-    } catch (TransactionFailureException e) {
-      abort(e);
-      // abort will rethrow this exception
-    } catch (Throwable e) {
-      String message = String.format("Exception from commit for transaction %d.", currentTx.getTransactionId());
+      commitSuccess = txClient.commit(currentTx);
+    } catch (TransactionNotInProgressException e) {
+      String message = String.format("Transaction %d is not in progress.", currentTx.getTransactionId());
+      LOG.warn(message, e);
       abort(new TransactionFailureException(message, e));
       // abort will throw that exception
+    } catch (Throwable e) {
+      String message = String.format("Exception from commit for transaction %d.", currentTx.getTransactionId());
+      LOG.warn(message, e);
+      abort(new TransactionFailureException(message, e));
+      // abort will throw that exception
+    }
+    if (!commitSuccess) {
+      String message = String.format("Conflict detected for transaction %d.", currentTx.getTransactionId());
+      abort(new TransactionConflictException(message));
+      // abort will throw
     }
   }
 

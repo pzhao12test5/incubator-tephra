@@ -81,13 +81,8 @@ public class TransactionStateCache extends AbstractIdleService implements Config
 
   @Override
   protected void shutDown() throws Exception {
-    if (refreshService != null) {
-      refreshService.interrupt();
-    }
-
-    if (storage != null) {
-      storage.stop();
-    }
+    this.refreshService.interrupt();
+    this.storage.stop();
   }
 
   /**

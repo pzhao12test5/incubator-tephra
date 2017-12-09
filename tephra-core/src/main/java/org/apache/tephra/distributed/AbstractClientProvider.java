@@ -24,6 +24,7 @@ import org.apache.thrift.TException;
 import org.apache.thrift.transport.TFramedTransport;
 import org.apache.thrift.transport.TSocket;
 import org.apache.thrift.transport.TTransport;
+import org.apache.thrift.transport.TTransportException;
 import org.apache.twill.discovery.Discoverable;
 import org.apache.twill.discovery.DiscoveryServiceClient;
 import org.slf4j.Logger;
@@ -92,20 +93,21 @@ public abstract class AbstractClientProvider implements ThriftClientProvider {
     if (endpointStrategy == null) {
       // if there is no discovery service, try to read host and port directly
       // from the configuration
-      LOG.debug("Reading transaction service address and port from configuration.");
+      LOG.info("Reading address and port from configuration.");
       address = configuration.get(TxConstants.Service.CFG_DATA_TX_BIND_ADDRESS,
                                   TxConstants.Service.DEFAULT_DATA_TX_BIND_ADDRESS);
       port = configuration.getInt(TxConstants.Service.CFG_DATA_TX_BIND_PORT,
                                   TxConstants.Service.DEFAULT_DATA_TX_BIND_PORT);
-      LOG.debug("Transaction service configured at {}:{}.", address, port);
+      LOG.info("Service assumed at " + address + ":" + port);
     } else {
       Discoverable endpoint = endpointStrategy.pick();
       if (endpoint == null) {
-        throw new TException("Unable to discover transaction service.");
+        LOG.error("Unable to discover tx service.");
+        throw new TException("Unable to discover tx service.");
       }
       address = endpoint.getSocketAddress().getHostName();
       port = endpoint.getSocketAddress().getPort();
-      LOG.debug("Transaction service discovered at {}:{}.", address, port);
+      LOG.info("Service discovered at " + address + ":" + port);
     }
 
     // now we have an address and port, try to connect a client
@@ -113,15 +115,22 @@ public abstract class AbstractClientProvider implements ThriftClientProvider {
       timeout = configuration.getInt(TxConstants.Service.CFG_DATA_TX_CLIENT_TIMEOUT,
           TxConstants.Service.DEFAULT_DATA_TX_CLIENT_TIMEOUT_MS);
     }
-    LOG.debug("Attempting to connect to transaction service at {}:{} with RPC timeout of {} ms." +
-               address, port, timeout);
+    LOG.info("Attempting to connect to tx service at " +
+               address + ":" + port + " with timeout " + timeout + " ms.");
     // thrift transport layer
-    TTransport transport = new TFramedTransport(new TSocket(address, port, timeout));
-    transport.open();
+    TTransport transport =
+        new TFramedTransport(new TSocket(address, port, timeout));
+    try {
+      transport.open();
+    } catch (TTransportException e) {
+      LOG.error("Unable to connect to tx service: " + e.getMessage());
+      throw e;
+    }
     // and create a thrift client
     TransactionServiceThriftClient newClient = new TransactionServiceThriftClient(transport);
 
-    LOG.debug("Connected to transaction service at {}:{}.", address, port);
+    LOG.info("Connected to tx service at " +
+               address + ":" + port);
     return newClient;
   }
 

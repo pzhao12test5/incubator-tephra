@@ -58,6 +58,7 @@ import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
+import org.apache.tephra.ChangeId;
 import org.apache.tephra.Transaction;
 import org.apache.tephra.TransactionManager;
 import org.apache.tephra.TxConstants;
@@ -73,7 +74,6 @@ import org.apache.tephra.snapshot.SnapshotCodecProvider;
 import org.apache.tephra.util.TxUtils;
 import org.apache.zookeeper.KeeperException;
 import org.junit.AfterClass;
-import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.ClassRule;
 import org.junit.Test;
@@ -88,6 +88,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ConcurrentSkipListMap;
@@ -149,7 +150,7 @@ public class TransactionProcessorTest {
         // this will set visibility upper bound to V[6]
         Maps.newTreeMap(ImmutableSortedMap.of(V[6], new TransactionManager.InProgressTx(
           V[6] - 1, Long.MAX_VALUE, TransactionManager.InProgressType.SHORT))),
-        new HashMap<Long, TransactionManager.ChangeSet>(), new TreeMap<Long, TransactionManager.ChangeSet>());
+        new HashMap<Long, Set<ChangeId>>(), new TreeMap<Long, Set<ChangeId>>());
     txVisibilityState = new TransactionSnapshot(txSnapshot.getTimestamp(), txSnapshot.getReadPointer(),
                                                 txSnapshot.getWritePointer(), txSnapshot.getInvalid(),
                                                 txSnapshot.getInProgress());
@@ -174,7 +175,7 @@ public class TransactionProcessorTest {
     try {
       region.initialize();
       TransactionStateCache cache = new TransactionStateCacheSupplier(conf).get();
-      LOG.info("Coprocessor is using transaction state: " + waitForTransactionState(cache));
+      LOG.info("Coprocessor is using transaction state: " + cache.getLatestState());
 
       for (int i = 1; i <= 8; i++) {
         for (int k = 1; k <= i; k++) {
@@ -189,7 +190,7 @@ public class TransactionProcessorTest {
       // force a flush to clear the data
       // during flush, the coprocessor should drop all KeyValues with timestamps in the invalid set
       LOG.info("Flushing region " + region.getRegionNameAsString());
-      region.flushcache(); // in 0.96, there is no indication of success
+      region.flushcache();
 
       // now a normal scan should only return the valid rows - testing that cleanup works on flush
       Scan scan = new Scan();
@@ -230,7 +231,7 @@ public class TransactionProcessorTest {
     try {
       region.initialize();
       TransactionStateCache cache = new TransactionStateCacheSupplier(conf).get();
-      LOG.info("Coprocessor is using transaction state: " + waitForTransactionState(cache));
+      LOG.info("Coprocessor is using transaction state: " + cache.getLatestState());
 
       byte[] row = Bytes.toBytes(1);
       for (int i = 4; i < V.length; i++) {
@@ -617,21 +618,6 @@ public class TransactionProcessorTest {
     assertNotNull(cachedSnapshot);
     assertEquals(invalidSet, cachedSnapshot.getInvalid());
     cache.stopAndWait();
-  }
-
-  private TransactionVisibilityState waitForTransactionState(TransactionStateCache cache) throws InterruptedException {
-    long timeout = 5000; // ms
-    do {
-      TransactionVisibilityState state = cache.getLatestState();
-      if (state != null) {
-        return state;
-      }
-      TimeUnit.MILLISECONDS.sleep(100);
-      timeout -= 100;
-    } while (timeout > 0L);
-    LOG.error("Timed out waiting foe transaction state cache");
-    Assert.fail("Timed out waiting foe transaction state cache");
-    return null;
   }
 
   private static class MockRegionServerServices implements RegionServerServices {
