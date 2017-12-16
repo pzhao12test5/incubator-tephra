@@ -37,6 +37,7 @@ import java.util.Map;
 import javax.annotation.Nullable;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 /**
  * HBase 0.96 specific test for filtering logic applied when reading data transactionally.
@@ -249,20 +250,20 @@ public class TransactionVisibilityFilterTest extends AbstractTransactionVisibili
      */
 
     Transaction tx1 = txManager.startShort();
-    txManager.canCommit(tx1.getTransactionId(), EMPTY_CHANGESET);
-    txManager.commit(tx1.getTransactionId(), tx1.getWritePointer());
+    assertTrue(txManager.canCommit(tx1, EMPTY_CHANGESET));
+    assertTrue(txManager.commit(tx1));
 
     Transaction tx2 = txManager.startShort();
-    txManager.canCommit(tx2.getTransactionId(), EMPTY_CHANGESET);
-    txManager.commit(tx2.getTransactionId(), tx2.getWritePointer());
+    assertTrue(txManager.canCommit(tx2, EMPTY_CHANGESET));
+    assertTrue(txManager.commit(tx2));
 
     Transaction tx3 = txManager.startShort();
     Transaction tx4 = txManager.startShort();
     txManager.invalidate(tx4.getTransactionId());
 
     Transaction tx5 = txManager.startShort();
-    txManager.canCommit(tx5.getTransactionId(), EMPTY_CHANGESET);
-    txManager.commit(tx5.getTransactionId(), tx5.getWritePointer());
+    assertTrue(txManager.canCommit(tx5, EMPTY_CHANGESET));
+    assertTrue(txManager.commit(tx5));
 
     Transaction tx6 = txManager.startShort();
 

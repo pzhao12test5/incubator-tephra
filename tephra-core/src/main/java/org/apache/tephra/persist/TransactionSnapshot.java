@@ -197,8 +197,8 @@ public class TransactionSnapshot implements TransactionVisibilityState {
   public static TransactionSnapshot copyFrom(long snapshotTime, long readPointer,
                                              long writePointer, InvalidTxList invalidTxList,
                                              NavigableMap<Long, TransactionManager.InProgressTx> inProgress,
-                                             Map<Long, TransactionManager.ChangeSet> committing,
-                                             NavigableMap<Long, TransactionManager.ChangeSet> committed) {
+                                             Map<Long, Set<ChangeId>> committing,
+                                             NavigableMap<Long, Set<ChangeId>> committed) {
     // copy invalid IDs, after sorting
     Collection<Long> invalidCopy = new LongArrayList(invalidTxList.toSortedArray());
     // copy in-progress IDs and expirations
@@ -206,13 +206,13 @@ public class TransactionSnapshot implements TransactionVisibilityState {
 
     // for committing and committed maps, we need to copy each individual Set as well to prevent modification
     Map<Long, Set<ChangeId>> committingCopy = Maps.newHashMap();
-    for (Map.Entry<Long, TransactionManager.ChangeSet> entry : committing.entrySet()) {
-      committingCopy.put(entry.getKey(), new HashSet<>(entry.getValue().getChangeIds()));
+    for (Map.Entry<Long, Set<ChangeId>> entry : committing.entrySet()) {
+      committingCopy.put(entry.getKey(), new HashSet<>(entry.getValue()));
     }
 
     NavigableMap<Long, Set<ChangeId>> committedCopy = new TreeMap<>();
-    for (Map.Entry<Long, TransactionManager.ChangeSet> entry : committed.entrySet()) {
-      committedCopy.put(entry.getKey(), new HashSet<>(entry.getValue().getChangeIds()));
+    for (Map.Entry<Long, Set<ChangeId>> entry : committed.entrySet()) {
+      committedCopy.put(entry.getKey(), new HashSet<>(entry.getValue()));
     }
 
     return new TransactionSnapshot(snapshotTime, readPointer, writePointer,

@@ -18,6 +18,7 @@
 
 package org.apache.tephra.distributed;
 
+import com.google.common.base.Throwables;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.tephra.TxConstants;
 import org.apache.thrift.TException;
@@ -77,8 +78,9 @@ public class PooledClientProvider extends AbstractClientProvider {
     maxClients = configuration.getInt(TxConstants.Service.CFG_DATA_TX_CLIENT_COUNT,
                                       TxConstants.Service.DEFAULT_DATA_TX_CLIENT_COUNT);
     if (maxClients < 1) {
-      LOG.warn("Configuration of {} is invalid: Value is {} but must be at least 1. Using 1 as a fallback.",
-               TxConstants.Service.CFG_DATA_TX_CLIENT_COUNT, maxClients);
+      LOG.warn("Configuration of " + TxConstants.Service.CFG_DATA_TX_CLIENT_COUNT +
+                 " is invalid: value is " + maxClients + " but must be at least 1. " +
+                 "Using 1 as a fallback. ");
       maxClients = 1;
     }
 
@@ -86,8 +88,9 @@ public class PooledClientProvider extends AbstractClientProvider {
       configuration.getLong(TxConstants.Service.CFG_DATA_TX_CLIENT_OBTAIN_TIMEOUT_MS,
                             TxConstants.Service.DEFAULT_DATA_TX_CLIENT_OBTAIN_TIMEOUT_MS);
     if (obtainClientTimeoutMs < 0) {
-      LOG.warn("Configuration of {} is invalid: Value is {} but must be at least 0. Using 0 as a fallback.",
-               TxConstants.Service.CFG_DATA_TX_CLIENT_COUNT, obtainClientTimeoutMs);
+      LOG.warn("Configuration of " + TxConstants.Service.CFG_DATA_TX_CLIENT_COUNT +
+                 " is invalid: value is " + obtainClientTimeoutMs + " but must be at least 0. " +
+                 "Using 0 as a fallback. ");
       obtainClientTimeoutMs = 0;
     }
     this.clients = new TxClientPool(maxClients);
@@ -106,7 +109,8 @@ public class PooledClientProvider extends AbstractClientProvider {
 
   @Override
   public String toString() {
-    return String.format("Elastic pool of size %d with timeout %d ms", maxClients, obtainClientTimeoutMs);
+    return "Elastic pool of size " + this.maxClients +
+      ", with timeout (in milliseconds): " + this.obtainClientTimeoutMs;
   }
 
   private TxClientPool getClientPool() {
@@ -119,7 +123,8 @@ public class PooledClientProvider extends AbstractClientProvider {
         try {
           initializePool();
         } catch (TException e) {
-          throw new RuntimeException("Failed to initialize transaction client provider: " + this, e);
+          LOG.error("Failed to initialize Tx client provider", e);
+          throw Throwables.propagate(e);
         }
       }
     }
