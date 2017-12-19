@@ -18,12 +18,10 @@
 
 package org.apache.tephra.inmemory;
 
-import com.google.common.annotations.VisibleForTesting;
 import com.google.inject.Inject;
 import org.apache.tephra.InvalidTruncateTimeException;
 import org.apache.tephra.Transaction;
 import org.apache.tephra.TransactionCouldNotTakeSnapshotException;
-import org.apache.tephra.TransactionFailureException;
 import org.apache.tephra.TransactionManager;
 import org.apache.tephra.TransactionNotInProgressException;
 import org.apache.tephra.TransactionSystemClient;
@@ -45,7 +43,6 @@ public class InMemoryTxSystemClient implements TransactionSystemClient {
 
   private static final Logger LOG = LoggerFactory.getLogger(InMemoryTxSystemClient.class);
 
-  @VisibleForTesting
   TransactionManager txManager;
 
   @Inject
@@ -70,35 +67,12 @@ public class InMemoryTxSystemClient implements TransactionSystemClient {
 
   @Override
   public boolean canCommit(Transaction tx, Collection<byte[]> changeIds) throws TransactionNotInProgressException {
-    try {
-      canCommitOrThrow(tx, changeIds);
-      return true;
-    } catch (TransactionFailureException e) {
-      return false;
-    }
-  }
-
-  @Override
-  public void canCommitOrThrow(Transaction tx, Collection<byte[]> changeIds)
-    throws TransactionFailureException {
-    if (!changeIds.isEmpty()) {
-      txManager.canCommit(tx.getTransactionId(), changeIds);
-    }
+    return changeIds.isEmpty() || txManager.canCommit(tx, changeIds);
   }
 
   @Override
   public boolean commit(Transaction tx) throws TransactionNotInProgressException {
-    try {
-      commitOrThrow(tx);
-      return true;
-    } catch (TransactionFailureException e) {
-      return false;
-    }
-  }
-
-  @Override
-  public void commitOrThrow(Transaction tx) throws TransactionFailureException {
-    txManager.commit(tx.getTransactionId(), tx.getWritePointer());
+    return txManager.commit(tx);
   }
 
   @Override
@@ -158,11 +132,5 @@ public class InMemoryTxSystemClient implements TransactionSystemClient {
   @Override
   public int getInvalidSize() {
     return txManager.getInvalidSize();
-  }
-
-
-  @Override
-  public void pruneNow() {
-    // no-op: no pruning in-memory
   }
 }
