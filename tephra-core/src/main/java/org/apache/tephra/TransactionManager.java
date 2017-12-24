@@ -130,9 +130,9 @@ public class TransactionManager extends AbstractService {
   // todo: use moving array instead (use Long2ObjectMap<byte[]> in fastutil)
   // todo: should this be consolidated with inProgress?
   // commit time next writePointer -> changes made by this tx
-  private final NavigableMap<Long, ChangeSet> committedChangeSets = new ConcurrentSkipListMap<>();
+  private final NavigableMap<Long, Set<ChangeId>> committedChangeSets = new ConcurrentSkipListMap<>();
   // not committed yet
-  private final Map<Long, ChangeSet> committingChangeSets = Maps.newConcurrentMap();
+  private final Map<Long, Set<ChangeId>> committingChangeSets = Maps.newConcurrentMap();
 
   private long readPointer;
   private long lastWritePointer;
@@ -157,19 +157,10 @@ public class TransactionManager extends AbstractService {
   private DaemonThreadExecutor snapshotThread;
   private DaemonThreadExecutor metricsThread;
 
-  // retention of client id for transactions - this affects memory footprint
-  private final boolean retainClientId;
-  private final boolean retainClientIdPastCommit;
-
   // lock guarding change of the current transaction log
   private final ReentrantReadWriteLock logLock = new ReentrantReadWriteLock();
   private final Lock logReadLock = logLock.readLock();
   private final Lock logWriteLock = logLock.writeLock();
-
-  private final int changeSetCountLimit;
-  private final int changeSetCountThreshold;
-  private final long changeSetSizeLimit;
-  private final long changeSetSizeThreshold;
 
   // fudge factor (in milliseconds) used when interpreting transactions as LONG based on expiration
   // TODO: REMOVE WITH txnBackwardsCompatCheck()
@@ -197,31 +188,15 @@ public class TransactionManager extends AbstractService {
     snapshotRetainCount = Math.max(conf.getInt(TxConstants.Manager.CFG_TX_SNAPSHOT_RETAIN,
                                                TxConstants.Manager.DEFAULT_TX_SNAPSHOT_RETAIN), 1);
 
-    changeSetCountLimit = conf.getInt(TxConstants.Manager.CFG_TX_CHANGESET_COUNT_LIMIT,
-                                      TxConstants.Manager.DEFAULT_TX_CHANGESET_COUNT_LIMIT);
-    changeSetCountThreshold = conf.getInt(TxConstants.Manager.CFG_TX_CHANGESET_COUNT_WARN_THRESHOLD,
-                                          TxConstants.Manager.DEFAULT_TX_CHANGESET_COUNT_WARN_THRESHOLD);
-    changeSetSizeLimit = conf.getLong(TxConstants.Manager.CFG_TX_CHANGESET_SIZE_LIMIT,
-                                      TxConstants.Manager.DEFAULT_TX_CHANGESET_SIZE_LIMIT);
-    changeSetSizeThreshold = conf.getLong(TxConstants.Manager.CFG_TX_CHANGESET_SIZE_WARN_THRESHOLD,
-                                          TxConstants.Manager.DEFAULT_TX_CHANGESET_SIZE_WARN_THRESHOLD);
-
     // intentionally not using a constant, as this config should not be exposed
     // TODO: REMOVE WITH txnBackwardsCompatCheck()
     longTimeoutTolerance = conf.getLong("data.tx.long.timeout.tolerance", 10000);
 
-    ClientIdRetention retention = ClientIdRetention.valueOf(
-      conf.get(TxConstants.Manager.CFG_TX_RETAIN_CLIENT_ID,
-               TxConstants.Manager.DEFAULT_TX_RETAIN_CLIENT_ID).toUpperCase());
-    this.retainClientId = retention != ClientIdRetention.OFF;
-    this.retainClientIdPastCommit = retention == ClientIdRetention.COMMITTED;
-
+    //
     this.txMetricsCollector = txMetricsCollector;
     this.txMetricsCollector.configure(conf);
     clear();
   }
-
-  enum ClientIdRetention { OFF, ACTIVE, COMMITTED }
 
   private void clear() {
     invalidTxList.clear();
@@ -411,7 +386,7 @@ public class TransactionManager extends AbstractService {
   }
 
   public synchronized TransactionSnapshot getSnapshot() throws IOException {
-    TransactionSnapshot snapshot;
+    TransactionSnapshot snapshot = null;
     if (!isRunning() && !isStopping()) {
       return null;
     }
@@ -447,8 +422,8 @@ public class TransactionManager extends AbstractService {
 
   private void doSnapshot(boolean closing) throws IOException {
     long snapshotTime = 0L;
-    TransactionSnapshot snapshot;
-    TransactionLog oldLog;
+    TransactionSnapshot snapshot = null;
+    TransactionLog oldLog = null;
     try {
       this.logWriteLock.lock();
       try {
@@ -532,12 +507,8 @@ public class TransactionManager extends AbstractService {
     lastWritePointer = snapshot.getWritePointer();
     invalidTxList.addAll(snapshot.getInvalid());
     inProgress.putAll(txnBackwardsCompatCheck(defaultLongTimeout, longTimeoutTolerance, snapshot.getInProgress()));
-    for (Map.Entry<Long, Set<ChangeId>> entry : snapshot.getCommittingChangeSets().entrySet()) {
-      committingChangeSets.put(entry.getKey(), new ChangeSet(null, entry.getValue()));
-    }
-    for (Map.Entry<Long, Set<ChangeId>> entry : snapshot.getCommittedChangeSets().entrySet()) {
-      committedChangeSets.put(entry.getKey(), new ChangeSet(null, entry.getValue()));
-    }
+    committingChangeSets.putAll(snapshot.getCommittingChangeSets());
+    committedChangeSets.putAll(snapshot.getCommittedChangeSets());
   }
 
   /**
@@ -608,7 +579,7 @@ public class TransactionManager extends AbstractService {
         if (reader == null) {
           continue;
         }
-        TransactionEdit edit;
+        TransactionEdit edit = null;
         while ((edit = reader.next()) != null) {
           editCnt++;
           switch (edit.getState()) {
@@ -628,7 +599,7 @@ public class TransactionManager extends AbstractService {
               addInProgressAndAdvance(edit.getWritePointer(), edit.getVisibilityUpperBound(), expiration, type, null);
               break;
             case COMMITTING:
-              addCommittingChangeSet(edit.getWritePointer(), null, edit.getChanges());
+              addCommittingChangeSet(edit.getWritePointer(), edit.getChanges());
               break;
             case COMMITTED:
               // TODO: need to reconcile usage of transaction id v/s write pointer TEPHRA-140
@@ -636,7 +607,7 @@ public class TransactionManager extends AbstractService {
               long[] checkpointPointers = edit.getCheckpointPointers();
               long writePointer = checkpointPointers == null || checkpointPointers.length == 0 ?
                 transactionId : checkpointPointers[checkpointPointers.length - 1];
-              doCommit(transactionId, writePointer, new ChangeSet(null, edit.getChanges()),
+              doCommit(transactionId, writePointer, edit.getChanges(),
                        edit.getCommitPointer(), edit.getCanCommit());
               break;
             case INVALID:
@@ -685,7 +656,9 @@ public class TransactionManager extends AbstractService {
               throw new IllegalArgumentException("Invalid state for WAL entry: " + edit.getState());
           }
         }
-      } catch (IOException | InvalidTruncateTimeException e) {
+      } catch (IOException ioe) {
+        throw Throwables.propagate(ioe);
+      } catch (InvalidTruncateTimeException e) {
         throw Throwables.propagate(e);
       }
       LOG.info("Read " + editCnt + " edits from log " + log.getName());
@@ -828,7 +801,7 @@ public class TransactionManager extends AbstractService {
   }
 
   private Transaction startTx(long expiration, TransactionType type, @Nullable String clientId) {
-    Transaction tx;
+    Transaction tx = null;
     long txid;
     // guard against changes to the transaction log while processing
     this.logReadLock.lock();
@@ -837,8 +810,7 @@ public class TransactionManager extends AbstractService {
         ensureAvailable();
         txid = getNextWritePointer();
         tx = createTransaction(txid, type);
-        addInProgressAndAdvance(tx.getTransactionId(), tx.getVisibilityUpperBound(), expiration, type,
-                                retainClientId ? clientId : null);
+        addInProgressAndAdvance(tx.getTransactionId(), tx.getVisibilityUpperBound(), expiration, type, clientId);
       }
       // appending to WAL out of global lock for concurrent performance
       // we should still be able to arrive at the same state even if log entries are out of order
@@ -867,99 +839,55 @@ public class TransactionManager extends AbstractService {
     }
   }
 
-  public void canCommit(long txId, Collection<byte[]> changeIds)
-    throws TransactionNotInProgressException, TransactionSizeException, TransactionConflictException {
-
+  public boolean canCommit(Transaction tx, Collection<byte[]> changeIds) throws TransactionNotInProgressException {
     txMetricsCollector.rate("canCommit");
     Stopwatch timer = new Stopwatch().start();
-    InProgressTx inProgressTx = inProgress.get(txId);
-    if (inProgressTx == null) {
+    if (inProgress.get(tx.getTransactionId()) == null) {
       synchronized (this) {
         // invalid transaction, either this has timed out and moved to invalid, or something else is wrong.
-        if (invalidTxList.contains(txId)) {
+        if (invalidTxList.contains(tx.getTransactionId())) {
           throw new TransactionNotInProgressException(
             String.format(
-              "canCommit() is called for transaction %d that is not in progress (it is known to be invalid)", txId));
+              "canCommit() is called for transaction %d that is not in progress (it is known to be invalid)",
+              tx.getTransactionId()));
         } else {
           throw new TransactionNotInProgressException(
-            String.format("canCommit() is called for transaction %d that is not in progress", txId));
+            String.format("canCommit() is called for transaction %d that is not in progress", tx.getTransactionId()));
         }
       }
     }
 
-    Set<ChangeId> set =
-      validateChangeSet(txId, changeIds, inProgressTx.clientId != null ? inProgressTx.clientId : DEFAULT_CLIENTID);
-    checkForConflicts(txId, set);
+    Set<ChangeId> set = Sets.newHashSetWithExpectedSize(changeIds.size());
+    for (byte[] change : changeIds) {
+      set.add(new ChangeId(change));
+    }
 
+    if (hasConflicts(tx, set)) {
+      return false;
+    }
     // guard against changes to the transaction log while processing
     this.logReadLock.lock();
     try {
       synchronized (this) {
         ensureAvailable();
-        addCommittingChangeSet(txId, inProgressTx.getClientId(), set);
+        addCommittingChangeSet(tx.getTransactionId(), set);
       }
-      appendToLog(TransactionEdit.createCommitting(txId, set));
+      appendToLog(TransactionEdit.createCommitting(tx.getTransactionId(), set));
     } finally {
       this.logReadLock.unlock();
     }
     txMetricsCollector.histogram("canCommit.latency", (int) timer.elapsedMillis());
+    return true;
   }
 
-  /**
-   * Validate the number of changes and the total size of changes. Log a warning if either of them exceeds the
-   * configured threshold, or log a warning and throw an exception if it exceeds the configured limit.
-   *
-   * We log here because application developers may ignore warnings. Logging here gives us a single point
-   * (the tx manager log) to identify all clients that send excessively large change sets.
-   *
-   * @return the same set of changes, transformed into a set of {@link ChangeId}s.
-   * @throws TransactionSizeException if the number or total size of the changes exceed the limit.
-   */
-  private Set<ChangeId> validateChangeSet(long txId, Collection<byte[]> changeIds,
-                                          String clientId) throws TransactionSizeException {
-    if (changeIds.size() > changeSetCountLimit) {
-      LOG.warn("Change set for transaction {} belonging to client '{}' has {} entries and exceeds " +
-                 "the allowed size of {}. Limit the number of changes, or use a long-running transaction. ",
-               txId, clientId, changeIds.size(), changeSetCountLimit);
-      throw new TransactionSizeException(String.format(
-        "Change set for transaction %d has %d entries and exceeds the limit of %d",
-        txId, changeIds.size(), changeSetCountLimit));
-    } else if (changeIds.size() > changeSetCountThreshold) {
-      LOG.warn("Change set for transaction {} belonging to client '{}' has {} entries. " +
-                 "It is recommended to limit the number of changes to {}, or to use a long-running transaction. ",
-               txId, clientId, changeIds.size(), changeSetCountThreshold);
-    }
-    long byteCount = 0L;
-    Set<ChangeId> set = Sets.newHashSetWithExpectedSize(changeIds.size());
-    for (byte[] change : changeIds) {
-      set.add(new ChangeId(change));
-      byteCount += change.length;
-    }
-    if (byteCount > changeSetSizeLimit) {
-      LOG.warn("Change set for transaction {} belonging to client '{}' has total size of {} bytes and exceeds " +
-                 "the allowed size of {} bytes. Limit the total size of changes, or use a long-running transaction. ",
-               txId, clientId, byteCount, changeSetSizeLimit);
-      throw new TransactionSizeException(String.format(
-        "Change set for transaction %d has total size of %d bytes and exceeds the limit of %d bytes",
-        txId, byteCount, changeSetSizeLimit));
-    } else if (byteCount > changeSetSizeThreshold) {
-      LOG.warn("Change set for transaction {} belonging to client '{}' has total size of {} bytes. " +
-                 "It is recommended to limit the total size to {} bytes, or to use a long-running transaction. ",
-               txId, clientId, byteCount, changeSetSizeThreshold);
-    }
-    return set;
+  private void addCommittingChangeSet(long writePointer, Set<ChangeId> changes) {
+    committingChangeSets.put(writePointer, changes);
   }
 
-  private void addCommittingChangeSet(long writePointer, String clientId, Set<ChangeId> changes) {
-    committingChangeSets.put(writePointer, new ChangeSet(retainClientIdPastCommit ? clientId : null, changes));
-  }
-
-  public void commit(long txId, long writePointer)
-    throws TransactionNotInProgressException, TransactionConflictException {
-
+  public boolean commit(Transaction tx) throws TransactionNotInProgressException {
     txMetricsCollector.rate("commit");
     Stopwatch timer = new Stopwatch().start();
-    ChangeSet changeSet;
+    Set<ChangeId> changeSet = null;
     boolean addToCommitted = true;
     long commitPointer;
     // guard against changes to the transaction log while processing
@@ -970,55 +898,57 @@ public class TransactionManager extends AbstractService {
         // we record commits at the first not-yet assigned transaction id to simplify clearing out change sets that
         // are no longer visible by any in-progress transactions
         commitPointer = lastWritePointer + 1;
-        if (inProgress.get(txId) == null) {
+        if (inProgress.get(tx.getTransactionId()) == null) {
           // invalid transaction, either this has timed out and moved to invalid, or something else is wrong.
-          if (invalidTxList.contains(txId)) {
+          if (invalidTxList.contains(tx.getTransactionId())) {
             throw new TransactionNotInProgressException(
               String.format("canCommit() is called for transaction %d that is not in progress " +
-                              "(it is known to be invalid)", txId));
+                              "(it is known to be invalid)", tx.getTransactionId()));
           } else {
             throw new TransactionNotInProgressException(
-              String.format("canCommit() is called for transaction %d that is not in progress", txId));
+              String.format("canCommit() is called for transaction %d that is not in progress", tx.getTransactionId()));
           }
         }
 
         // these should be atomic
         // NOTE: whether we succeed or not we don't need to keep changes in committing state: same tx cannot
         //       be attempted to commit twice
-        changeSet = committingChangeSets.remove(txId);
+        changeSet = committingChangeSets.remove(tx.getTransactionId());
 
         if (changeSet != null) {
           // double-checking if there are conflicts: someone may have committed since canCommit check
-          checkForConflicts(txId, changeSet.getChangeIds());
+          if (hasConflicts(tx, changeSet)) {
+            return false;
+          }
         } else {
           // no changes
           addToCommitted = false;
         }
-        doCommit(txId, writePointer, changeSet, commitPointer, addToCommitted);
+        doCommit(tx.getTransactionId(), tx.getWritePointer(), changeSet, commitPointer, addToCommitted);
       }
-      appendToLog(TransactionEdit.createCommitted(txId, changeSet == null ? null : changeSet.getChangeIds(),
-                                                  commitPointer, addToCommitted));
+      appendToLog(TransactionEdit.createCommitted(tx.getTransactionId(), changeSet, commitPointer, addToCommitted));
     } finally {
       this.logReadLock.unlock();
     }
     txMetricsCollector.histogram("commit.latency", (int) timer.elapsedMillis());
+    return true;
   }
 
-  private void doCommit(long transactionId, long writePointer, ChangeSet changes, long commitPointer,
+  private void doCommit(long transactionId, long writePointer, Set<ChangeId> changes, long commitPointer,
                         boolean addToCommitted) {
     // In case this method is called when loading a previous WAL, we need to remove the tx from these sets
     committingChangeSets.remove(transactionId);
-    if (addToCommitted && !changes.getChangeIds().isEmpty()) {
+    if (addToCommitted && !changes.isEmpty()) {
       // No need to add empty changes to the committed change sets, they will never trigger any conflict
 
       // Record the committed change set with the next writePointer as the commit time.
       // NOTE: we use current next writePointer as key for the map, hence we may have multiple txs changesets to be
       //       stored under one key
-      ChangeSet committed = committedChangeSets.get(commitPointer);
-      if (committed != null) {
+      Set<ChangeId> changeIds = committedChangeSets.get(commitPointer);
+      if (changeIds != null) {
         // NOTE: we modify the new set to prevent concurrent modification exception, as other threads (e.g. in
         // canCommit) use it unguarded
-        changes.getChangeIds().addAll(committed.getChangeIds());
+        changes.addAll(changeIds);
       }
       committedChangeSets.put(commitPointer, changes);
     }
@@ -1122,7 +1052,7 @@ public class TransactionManager extends AbstractService {
   }
 
   private boolean doInvalidate(long writePointer) {
-    ChangeSet previousChangeSet = committingChangeSets.remove(writePointer);
+    Set<ChangeId> previousChangeSet = committingChangeSets.remove(writePointer);
     // remove from in-progress set, so that it does not get excluded in the future
     InProgressTx previous = inProgress.remove(writePointer);
 
@@ -1234,9 +1164,9 @@ public class TransactionManager extends AbstractService {
     txMetricsCollector.rate("checkpoint");
     Stopwatch timer = new Stopwatch().start();
 
-    Transaction checkpointedTx;
+    Transaction checkpointedTx = null;
     long txId = originalTx.getTransactionId();
-    long newWritePointer;
+    long newWritePointer = 0;
     // guard against changes to the transaction log while processing
     this.logReadLock.lock();
     try {
@@ -1294,49 +1224,39 @@ public class TransactionManager extends AbstractService {
     return this.committedChangeSets.size();
   }
 
-  @Nullable
-  @VisibleForTesting
-  InProgressTx getInProgress(long transactionId) {
-    return inProgress.get(transactionId);
-  }
-
-  private void checkForConflicts(long txId, Set<ChangeId> changeIds) throws TransactionConflictException {
+  private boolean hasConflicts(Transaction tx, Set<ChangeId> changeIds) {
     if (changeIds.isEmpty()) {
-      return;
+      return false;
     }
 
-    for (Map.Entry<Long, ChangeSet> committed : committedChangeSets.entrySet()) {
+    for (Map.Entry<Long, Set<ChangeId>> changeSet : committedChangeSets.entrySet()) {
       // If commit time is greater than tx read-pointer,
       // basically not visible but committed means "tx committed after given tx was started"
-      if (committed.getKey() > txId) {
-        ChangeId change = overlap(committed.getValue().getChangeIds(), changeIds);
-        if (change != null) {
-          throw new TransactionConflictException(txId, change.toString(), committed.getValue().getClientId());
+      if (changeSet.getKey() > tx.getTransactionId()) {
+        if (overlap(changeSet.getValue(), changeIds)) {
+          return true;
         }
       }
     }
+    return false;
   }
 
-  /**
-   * Checks for overlap in two change sets, returns the first common change it finds, or null if no overlap.
-   */
-  @Nullable
-  private ChangeId overlap(Set<ChangeId> a, Set<ChangeId> b) {
+  private boolean overlap(Set<ChangeId> a, Set<ChangeId> b) {
     // iterate over the smaller set, and check for every element in the other set
     if (a.size() > b.size()) {
       for (ChangeId change : b) {
         if (a.contains(change)) {
-          return change;
+          return true;
         }
       }
     } else {
       for (ChangeId change : a) {
         if (b.contains(change)) {
-          return change;
+          return true;
         }
       }
     }
-    return null;
+    return false;
   }
 
   private void moveReadPointerIfNeeded(long committedWritePointer) {
@@ -1405,9 +1325,9 @@ public class TransactionManager extends AbstractService {
   }
 
   private abstract static class DaemonThreadExecutor extends Thread {
-    private final AtomicBoolean stopped = new AtomicBoolean(false);
+    private AtomicBoolean stopped = new AtomicBoolean(false);
 
-    DaemonThreadExecutor(String name) {
+    public DaemonThreadExecutor(String name) {
       super(name);
       setDaemon(true);
     }
@@ -1597,25 +1517,4 @@ public class TransactionManager extends AbstractService {
     }
   }
 
-  /**
-   * Represents a set of changes from a client.
-   */
-  public static class ChangeSet {
-    final String clientId;
-    final Set<ChangeId> changeIds;
-
-    ChangeSet(@Nullable String clientId, Set<ChangeId> changeIds) {
-      this.clientId = clientId;
-      this.changeIds = changeIds;
-    }
-
-    @Nullable
-    public String getClientId() {
-      return clientId;
-    }
-
-    public Set<ChangeId> getChangeIds() {
-      return changeIds;
-    }
-  }
 }

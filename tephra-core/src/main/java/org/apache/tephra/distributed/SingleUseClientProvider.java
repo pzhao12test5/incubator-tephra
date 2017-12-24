@@ -43,7 +43,12 @@ public class SingleUseClientProvider extends AbstractClientProvider {
 
   @Override
   public CloseableThriftClient getCloseableClient() throws TException, TimeoutException, InterruptedException {
-    return new CloseableThriftClient(this, newClient(timeout));
+    try {
+      return new CloseableThriftClient(this, newClient(timeout));
+    } catch (TException e) {
+      LOG.error("Unable to create new tx client: " + e.getMessage());
+      throw e;
+    }
   }
 
   @Override

@@ -61,7 +61,6 @@ public class LocalFileTransactionStateStorage extends AbstractTransactionStateSt
   };
 
   private final String configuredSnapshotDir;
-  private final Configuration conf;
   private final MetricsCollector metricsCollector;
   private File snapshotDir;
 
@@ -70,7 +69,6 @@ public class LocalFileTransactionStateStorage extends AbstractTransactionStateSt
                                           MetricsCollector metricsCollector) {
     super(codecProvider);
     this.configuredSnapshotDir = conf.get(TxConstants.Manager.CFG_TX_SNAPSHOT_LOCAL_DIR);
-    this.conf = conf;
     this.metricsCollector = metricsCollector;
   }
 
@@ -222,7 +220,7 @@ public class LocalFileTransactionStateStorage extends AbstractTransactionStateSt
       @Nullable
       @Override
       public TransactionLog apply(@Nullable TimestampedFilename input) {
-        return new LocalFileTransactionLog(input.getFile(), input.getTimestamp(), metricsCollector, conf);
+        return new LocalFileTransactionLog(input.getFile(), input.getTimestamp(), metricsCollector);
       }
     });
   }
@@ -231,7 +229,7 @@ public class LocalFileTransactionStateStorage extends AbstractTransactionStateSt
   public TransactionLog createLog(long timestamp) throws IOException {
     File newLogFile = new File(snapshotDir, LOG_FILE_PREFIX + timestamp);
     LOG.info("Creating new transaction log at {}", newLogFile.getAbsolutePath());
-    return new LocalFileTransactionLog(newLogFile, timestamp, metricsCollector, conf);
+    return new LocalFileTransactionLog(newLogFile, timestamp, metricsCollector);
   }
 
   @Override
