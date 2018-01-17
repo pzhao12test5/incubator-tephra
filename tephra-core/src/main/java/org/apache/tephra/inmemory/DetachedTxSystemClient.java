@@ -33,7 +33,9 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Implementation of the tx system client that doesn't talk to any global service and tries to do its best to meet the
- * tx system requirements/expectations.
+ * tx system requirements/expectations. In fact it implements enough logic to support running flows (when each flowlet
+ * uses its own detached tx system client, without talking to each other and sharing any state) with "process exactly
+ * once" guarantee if no failures happen.
  *
  * NOTE: Will NOT detect conflicts. May leave inconsistent state when process crashes. Does NOT provide even read
  *       isolation guarantees.
@@ -41,7 +43,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * Good for performance testing. For demoing high throughput. For use-cases with relaxed tx guarantees.
  */
 public class DetachedTxSystemClient implements TransactionSystemClient {
-  // client logic may rely on tx id to grow monotonically even after restart. Hence we need to start with
+  // Dataset and queue logic relies on tx id to grow monotonically even after restart. Hence we need to start with
   // value that is for sure bigger than the last one used before restart.
   // NOTE: with code below we assume we don't do more than InMemoryTransactionManager.MAX_TX_PER_MS tx/ms
   //       by single client
@@ -86,18 +88,8 @@ public class DetachedTxSystemClient implements TransactionSystemClient {
   }
 
   @Override
-  public void canCommitOrThrow(Transaction tx, Collection<byte[]> changeIds) {
-    // do nothing
-  }
-
-  @Override
   public boolean commit(Transaction tx) {
     return true;
-  }
-
-  @Override
-  public void commitOrThrow(Transaction tx) {
-    // do nothing
   }
 
   @Override
@@ -147,10 +139,5 @@ public class DetachedTxSystemClient implements TransactionSystemClient {
   @Override
   public int getInvalidSize() {
     return 0;
-  }
-
-  @Override
-  public void pruneNow() {
-    // do nothing
   }
 }

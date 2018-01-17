@@ -26,9 +26,8 @@ import org.apache.tephra.metrics.TxMetricsCollector;
 import org.apache.tephra.persist.InMemoryTransactionStateStorage;
 import org.apache.tephra.persist.TransactionStateStorage;
 import org.junit.After;
-import org.junit.AfterClass;
 import org.junit.Assert;
-import org.junit.BeforeClass;
+import org.junit.Before;
 import org.junit.Test;
 
 import java.util.Arrays;
@@ -38,13 +37,12 @@ import java.util.concurrent.TimeUnit;
 /**
  *
  */
-@SuppressWarnings("WeakerAccess")
 public class TransactionManagerTest extends TransactionSystemTest {
 
-  private static Configuration conf;
+  static Configuration conf = new Configuration();
 
-  private static TransactionManager txManager = null;
-  private static TransactionStateStorage txStateStorage = null;
+  TransactionManager txManager = null;
+  TransactionStateStorage txStateStorage = null;
 
   @Override
   protected TransactionSystemClient getClient() {
@@ -56,10 +54,10 @@ public class TransactionManagerTest extends TransactionSystemTest {
     return txStateStorage;
   }
 
-  @BeforeClass
-  public static void beforeClass() {
-    conf = getCommonConfiguration(null);
+  @Before
+  public void before() {
     conf.setInt(TxConstants.Manager.CFG_TX_CLEANUP_INTERVAL, 0); // no cleanup thread
+    conf.setInt(TxConstants.Manager.CFG_TX_MAX_TIMEOUT, (int) TimeUnit.DAYS.toSeconds(5)); // very long limit
     // todo should create two sets of tests, one with LocalFileTxStateStorage and one with InMemoryTxStateStorage
     txStateStorage = new InMemoryTransactionStateStorage();
     txManager = new TransactionManager
@@ -67,18 +65,13 @@ public class TransactionManagerTest extends TransactionSystemTest {
     txManager.startAndWait();
   }
 
-  @AfterClass
-  public static void afterClass() {
+  @After
+  public void after() {
     txManager.stopAndWait();
   }
 
-  @After
-  public void after() {
-    txManager.resetState();
-  }
-
   @Test
-  public void testCheckpointing() throws TransactionFailureException {
+  public void testCheckpointing() throws TransactionNotInProgressException {
     // create a few transactions
     Transaction tx1 = txManager.startShort();
     Transaction tx2 = txManager.startShort();
@@ -87,8 +80,8 @@ public class TransactionManagerTest extends TransactionSystemTest {
     // start and commit a few
     for (int i = 0; i < 5; i++) {
       Transaction tx = txManager.startShort();
-      txManager.canCommit(tx.getTransactionId(), Collections.singleton(new byte[] { (byte) i }));
-      txManager.commit(tx.getTransactionId(), tx.getWritePointer());
+      Assert.assertTrue(txManager.canCommit(tx, Collections.singleton(new byte[] { (byte) i })));
+      Assert.assertTrue(txManager.commit(tx));
     }
 
     // checkpoint the transactions
@@ -99,8 +92,8 @@ public class TransactionManagerTest extends TransactionSystemTest {
     // start and commit a few (this moves the read pointer past all checkpoint write versions)
     for (int i = 5; i < 10; i++) {
       Transaction tx = txManager.startShort();
-      txManager.canCommit(tx.getTransactionId(), Collections.singleton(new byte[] { (byte) i }));
-      txManager.commit(tx.getTransactionId(), tx.getWritePointer());
+      Assert.assertTrue(txManager.canCommit(tx, Collections.singleton(new byte[] { (byte) i })));
+      Assert.assertTrue(txManager.commit(tx));
     }
 
     // start new tx and validate all write pointers are excluded
@@ -142,8 +135,8 @@ public class TransactionManagerTest extends TransactionSystemTest {
     txManager.abort(tx);
 
     // commit the last checkpoint
-    txManager.canCommit(tx3.getTransactionId(), Collections.<byte[]>emptyList());
-    txManager.commit(tx3c.getTransactionId(), tx3c.getWritePointer());
+    Assert.assertTrue(txManager.canCommit(tx3, Collections.<byte[]>emptyList()));
+    Assert.assertTrue(txManager.commit(tx3c));
 
     // start new tx and validate all write pointers are excluded
     tx = txManager.startShort();
@@ -165,12 +158,11 @@ public class TransactionManagerTest extends TransactionSystemTest {
 
   @Test
   public void testTransactionCleanup() throws Exception {
-    Configuration config = new Configuration(conf);
-    config.setInt(TxConstants.Manager.CFG_TX_CLEANUP_INTERVAL, 3);
-    config.setInt(TxConstants.Manager.CFG_TX_TIMEOUT, 2);
+    conf.setInt(TxConstants.Manager.CFG_TX_CLEANUP_INTERVAL, 3);
+    conf.setInt(TxConstants.Manager.CFG_TX_TIMEOUT, 2);
     // using a new tx manager that cleans up
     TransactionManager txm = new TransactionManager
-      (config, new InMemoryTransactionStateStorage(), new TxMetricsCollector());
+      (conf, new InMemoryTransactionStateStorage(), new TxMetricsCollector());
     txm.startAndWait();
     try {
       Assert.assertEquals(0, txm.getInvalidSize());
@@ -186,8 +178,8 @@ public class TransactionManagerTest extends TransactionSystemTest {
       // start and commit a bunch of transactions
       for (int i = 0; i < 10; i++) {
         Transaction tx = txm.startShort();
-        txm.canCommit(tx.getTransactionId(), Collections.singleton(new byte[] { (byte) i }));
-        txm.commit(tx.getTransactionId(), tx.getWritePointer());
+        Assert.assertTrue(txm.canCommit(tx, Collections.singleton(new byte[] { (byte) i })));
+        Assert.assertTrue(txm.commit(tx));
       }
       // all of these should still be in the committed set
       Assert.assertEquals(0, txm.getInvalidSize());
@@ -212,14 +204,14 @@ public class TransactionManagerTest extends TransactionSystemTest {
                                  tx2.getWritePointer(),
                                  tx2c.getWritePointer()}, txx.getInvalids());
       // try to commit the last transaction that was started
-      txm.canCommit(txx.getTransactionId(), Collections.singleton(new byte[] { 0x0a }));
-      txm.commit(txx.getTransactionId(), txx.getWritePointer());
+      Assert.assertTrue(txm.canCommit(txx, Collections.singleton(new byte[] { 0x0a })));
+      Assert.assertTrue(txm.commit(txx));
 
       // now the committed change sets should be empty again
       Assert.assertEquals(0, txm.getCommittedSize());
       // cannot commit transaction as it was timed out
       try {
-        txm.canCommit(tx1.getTransactionId(), Collections.singleton(new byte[] { 0x11 }));
+        txm.canCommit(tx1, Collections.singleton(new byte[] { 0x11 }));
         Assert.fail();
       } catch (TransactionNotInProgressException e) {
         // expected
@@ -236,14 +228,14 @@ public class TransactionManagerTest extends TransactionSystemTest {
       // run another bunch of transactions
       for (int i = 0; i < 10; i++) {
         Transaction tx = txm.startShort();
-        txm.canCommit(tx.getTransactionId(), Collections.singleton(new byte[] { (byte) i }));
-        txm.commit(tx.getTransactionId(), tx.getWritePointer());
+        Assert.assertTrue(txm.canCommit(tx, Collections.singleton(new byte[] { (byte) i })));
+        Assert.assertTrue(txm.commit(tx));
       }
       // none of these should still be in the committed set (tx2 is long-running).
       Assert.assertEquals(0, txm.getInvalidSize());
       Assert.assertEquals(0, txm.getCommittedSize());
       // commit tx2, abort tx3
-      txm.commit(ltx1.getTransactionId(), ltx1.getWritePointer());
+      Assert.assertTrue(txm.commit(ltx1));
       txm.abort(ltx2);
       // none of these should still be in the committed set (tx2 is long-running).
       // Only tx3 is invalid list as it was aborted and is long-running. tx1 is short one and it rolled back its changes
@@ -258,12 +250,11 @@ public class TransactionManagerTest extends TransactionSystemTest {
 
   @Test
   public void testLongTransactionCleanup() throws Exception {
-    Configuration config = new Configuration(conf);
-    config.setInt(TxConstants.Manager.CFG_TX_CLEANUP_INTERVAL, 3);
-    config.setInt(TxConstants.Manager.CFG_TX_LONG_TIMEOUT, 2);
+    conf.setInt(TxConstants.Manager.CFG_TX_CLEANUP_INTERVAL, 3);
+    conf.setInt(TxConstants.Manager.CFG_TX_LONG_TIMEOUT, 2);
     // using a new tx manager that cleans up
     TransactionManager txm = new TransactionManager
-      (config, new InMemoryTransactionStateStorage(), new TxMetricsCollector());
+      (conf, new InMemoryTransactionStateStorage(), new TxMetricsCollector());
     txm.startAndWait();
     try {
       Assert.assertEquals(0, txm.getInvalidSize());
@@ -284,7 +275,7 @@ public class TransactionManagerTest extends TransactionSystemTest {
 
       // cannot commit transaction as it was timed out
       try {
-        txm.canCommit(tx1.getTransactionId(), Collections.singleton(new byte[] { 0x11 }));
+        txm.canCommit(tx1, Collections.singleton(new byte[] { 0x11 }));
         Assert.fail();
       } catch (TransactionNotInProgressException e) {
         // expected
